@@ -1,10 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { CharacterId, GameSaveState } from '../../types/game';
+import { CharacterId } from '../../types/game';
 import { CHARACTERS } from '../../data/characters';
 import { getCharacterSprite } from '../../utils/pixelArt';
 import { sounds } from '../../utils/audio';
 import { LeaderboardModal } from './LeaderboardModal';
-import { SaveTransferModal } from './SaveTransferModal';
+import { HowToPlayModal } from './HowToPlayModal';
+import { getPlayerTag } from '../../utils/leaderboard';
 
 interface TitleScreenProps {
   hasSaveData: boolean;
@@ -13,7 +14,6 @@ interface TitleScreenProps {
   onStartNewGame: () => void;
   onContinueGame: () => void;
   onResetSave: () => void;
-  onSaveImported?: (data: GameSaveState) => void;
   volumeEnabled: boolean;
   onToggleVolume: () => void;
 }
@@ -25,14 +25,13 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
   onStartNewGame,
   onContinueGame,
   onResetSave,
-  onSaveImported,
   volumeEnabled,
   onToggleVolume,
 }) => {
   const [showConfirmReset, setShowConfirmReset] = useState(false);
   const [showConfirmNewGame, setShowConfirmNewGame] = useState(false);
   const [showLeaderboard, setShowLeaderboard] = useState(false);
-  const [showSaveTransfer, setShowSaveTransfer] = useState(false);
+  const [showHowToPlay, setShowHowToPlay] = useState(false);
   const [animFrame, setAnimFrame] = useState(0);
 
   // Animate character preview idle
@@ -45,11 +44,21 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
 
   const currentChar = CHARACTERS.find((c) => c.id === selectedCharacter) || CHARACTERS[0];
 
+  const playerTag = getPlayerTag();
+
   return (
     <div className="fixed inset-0 z-40 bg-[#0c0b18] wagara-ichimatsu bg-opacity-90 flex flex-col items-center justify-between p-6 select-none overflow-y-auto">
       {/* Top Header / Sound Toggle */}
       <div className="w-full max-w-3xl flex justify-between items-center text-xs font-pixel text-slate-400">
-        <span className="text-[10px] text-amber-500/80">PIXEL-ART ADVENTURE</span>
+        <div className="flex items-center gap-2">
+          <span className="text-[10px] text-amber-500/80">PIXEL-ART ADVENTURE</span>
+          <span
+            className="text-[9px] font-mono text-cyan-400 bg-cyan-950/70 border border-cyan-500/50 px-1.5 py-0.5 rounded-xs"
+            title="Your unique identification # tag for event prizes"
+          >
+            ID: {playerTag}
+          </span>
+        </div>
         <button
           onClick={onToggleVolume}
           className="px-2.5 py-1 bg-slate-900 border border-slate-700 hover:border-slate-500 text-slate-300 cursor-pointer text-[10px]"
@@ -128,6 +137,17 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
           <button
             onClick={() => {
               sounds.playSelect();
+              setShowHowToPlay(true);
+            }}
+            className="py-2.5 bg-cyan-950/90 hover:bg-cyan-900 text-cyan-300 font-pixel text-xs border-2 border-cyan-400/80 cursor-pointer active:translate-y-0.5 shadow-md flex items-center justify-center gap-2"
+          >
+            <span>📜</span>
+            <span>HOW TO PLAY</span>
+          </button>
+
+          <button
+            onClick={() => {
+              sounds.playSelect();
               if (hasSaveData) {
                 setShowConfirmNewGame(true);
               } else {
@@ -148,17 +168,6 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
           >
             <span>🏆</span>
             <span>HALL OF FAME</span>
-          </button>
-
-          <button
-            onClick={() => {
-              sounds.playSelect();
-              setShowSaveTransfer(true);
-            }}
-            className="py-2 bg-slate-900 hover:bg-slate-800 text-cyan-300 font-pixel text-[10px] border border-cyan-700/80 cursor-pointer active:translate-y-0.5 flex items-center justify-center gap-1.5 shadow-sm"
-          >
-            <span>💾</span>
-            <span>BACKUP & RESTORE SAVE</span>
           </button>
 
           {hasSaveData && (
@@ -238,18 +247,11 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
         </div>
       )}
 
+      {/* How To Play Modal */}
+      {showHowToPlay && <HowToPlayModal onClose={() => setShowHowToPlay(false)} />}
+
       {/* Leaderboard Modal */}
       {showLeaderboard && <LeaderboardModal onClose={() => setShowLeaderboard(false)} />}
-
-      {/* Save Backup & Restore Modal */}
-      {showSaveTransfer && (
-        <SaveTransferModal
-          onClose={() => setShowSaveTransfer(false)}
-          onSaveImported={(data) => {
-            if (onSaveImported) onSaveImported(data);
-          }}
-        />
-      )}
     </div>
   );
 };

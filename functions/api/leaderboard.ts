@@ -2,6 +2,7 @@ export interface LeaderboardEntry {
   id: string;
   runName: string;
   playerName?: string;
+  playerTag?: string;
   playtimeSeconds: number;
   totalKana: number;
   characterId: string;
@@ -10,6 +11,8 @@ export interface LeaderboardEntry {
   craftedWords?: string[];
   timestamp: number;
   formattedDate: string;
+  isImported?: boolean;
+  verified?: boolean;
 }
 
 interface Env {
@@ -20,12 +23,12 @@ interface Env {
   LEADERBOARD_ADMIN_KEY?: string;
 }
 
+// In-memory fallback across warm edge nodes
+let memoryLeaderboard: LeaderboardEntry[] = [];
+
 const GLOBAL_BIN_URL = 'https://extendsclass.com/api/json-storage/bin/adadbea';
 const GLOBAL_SECURITY_KEY = 'kana-escape-room-2026-secret-key';
 const DEFAULT_ADMIN_KEY = 'kana-admin-2026';
-
-// In-memory fallback across warm edge nodes
-let memoryLeaderboard: LeaderboardEntry[] = [];
 
 const CORS_HEADERS = {
   'Content-Type': 'application/json',
@@ -42,12 +45,10 @@ async function fetchRemoteEntries(): Promise<LeaderboardEntry[]> {
     });
     if (res.ok) {
       const data: any = await res.json();
-      if (data && Array.isArray(data.runs)) return data.runs;
-      if (Array.isArray(data)) return data;
+      if (data && Array.isArray(data.runs) && data.runs.length > 0) return data.runs;
+      if (Array.isArray(data) && data.length > 0) return data;
     }
-  } catch {
-    // ignore
-  }
+  } catch {}
   return [];
 }
 
@@ -70,6 +71,7 @@ async function saveRemoteEntries(entries: LeaderboardEntry[]): Promise<boolean> 
 export const onRequestGet = async (context: { env: Env }) => {
   try {
     let entries: LeaderboardEntry[] = [];
+    let kvFound = false;
 
     // 1. Check Cloudflare KV if bound
     if (context.env?.LEADERBOARD_KV) {
@@ -77,18 +79,24 @@ export const onRequestGet = async (context: { env: Env }) => {
         const data = await context.env.LEADERBOARD_KV.get('global_leaderboard', 'json');
         if (Array.isArray(data) && data.length > 0) {
           entries = data;
+          kvFound = true;
         }
       } catch {}
     }
 
-    // 2. Fetch from persistent global cloud storage
-    if (entries.length === 0) {
-      entries = await fetchRemoteEntries();
+    // 2. Persistent cloud fallback if KV is unbound or empty
+    if (!kvFound || entries.length === 0) {
+      const remote = await fetchRemoteEntries();
+      if (remote.length > 0) {
+        entries = remote;
+      }
     }
 
     // 3. Fallback to in-memory cache
     if (entries.length === 0 && memoryLeaderboard.length > 0) {
       entries = memoryLeaderboard;
+    } else if (entries.length > 0) {
+      memoryLeaderboard = entries;
     }
 
     return new Response(JSON.stringify(entries), {
@@ -114,7 +122,75 @@ export const onRequestPost = async (context: { request: Request; env: Env }) => 
       });
     }
 
-    // 1. Fetch current runs
+    // 1. Block imported or unverified runs from the global competitive leaderboard
+    if (newEntry.isImported || (newEntry as any).verified === false) {
+      return new Response(
+        JSON.stringify({ error: 'Imported/unverified runs are excluded from competitive global leaderboards.' }),
+        {
+          status: 403,
+          headers: CORS_HEADERS,
+        }
+      );
+    }
+
+    // 2. Server-side speedrun plausibility checks:
+    // Minimum humanly possible time for 3 escape rooms and minigames is >= 45 seconds
+    if (newEntry.playtimeSeconds < 45 || !Number.isInteger(newEntry.playtimeSeconds) || newEntry.playtimeSeconds > 86400) {
+      return new Response(
+        JSON.stringify({ error: 'Rejected: Implausibly low speedrun time detected.' }),
+        {
+          status: 400,
+          headers: CORS_HEADERS,
+        }
+      );
+    }
+
+    // 3. Must have cleared all 3 rooms
+    if (newEntry.roomsCleared !== 3) {
+      return new Response(
+        JSON.stringify({ error: 'Rejected: Incomplete run. All 3 rooms must be cleared.' }),
+        {
+          status: 400,
+          headers: CORS_HEADERS,
+        }
+      );
+    }
+
+    // 4. Must have crafted the final exit word 'でぐち'
+    if (!Array.isArray(newEntry.craftedWords) || !newEntry.craftedWords.includes('でぐち')) {
+      return new Response(
+        JSON.stringify({ error: 'Rejected: Missing required final exit word.' }),
+        {
+          status: 400,
+          headers: CORS_HEADERS,
+        }
+      );
+    }
+
+    // 5. Must have plausible collected kana count (at least 3 kana needed for exit)
+    if (typeof newEntry.totalKana !== 'number' || newEntry.totalKana < 3 || newEntry.totalKana > 30) {
+      return new Response(
+        JSON.stringify({ error: 'Rejected: Invalid kana item count.' }),
+        {
+          status: 400,
+          headers: CORS_HEADERS,
+        }
+      );
+    }
+
+    // 6. Character ID check
+    const validChars = ['adam', 'alex', 'amelia', 'bob'];
+    if (!validChars.includes(newEntry.characterId)) {
+      return new Response(
+        JSON.stringify({ error: 'Rejected: Invalid character profile.' }),
+        {
+          status: 400,
+          headers: CORS_HEADERS,
+        }
+      );
+    }
+
+    // Fetch current runs from authoritative store
     let entries: LeaderboardEntry[] = [];
     if (context.env?.LEADERBOARD_KV) {
       try {
@@ -131,8 +207,18 @@ export const onRequestPost = async (context: { request: Request; env: Env }) => 
     entries.forEach((e) => map.set(e.id, e));
     memoryLeaderboard.forEach((e) => map.set(e.id, e));
 
-    // Upsert the new run
-    map.set(newEntry.id, newEntry);
+    // Ensure server stamps verified
+    const sanitizedEntry: LeaderboardEntry = {
+      ...newEntry,
+      verified: true,
+      isImported: false,
+      runName: String(newEntry.runName || 'Explorer').slice(0, 35),
+      playerName: String(newEntry.playerName || newEntry.runName || 'Explorer').slice(0, 30),
+      playerTag: newEntry.playerTag ? String(newEntry.playerTag).slice(0, 10) : undefined,
+      timestamp: Date.now(),
+    };
+
+    map.set(sanitizedEntry.id, sanitizedEntry);
 
     // Sort: lowest playtime first (fastest escape), then highest kana, then latest
     const allEntries = Array.from(map.values())
@@ -149,14 +235,14 @@ export const onRequestPost = async (context: { request: Request; env: Env }) => 
 
     memoryLeaderboard = allEntries;
 
-    // 2. Persist to Cloudflare KV if bound
+    // 1. Persist to Cloudflare KV if bound
     if (context.env?.LEADERBOARD_KV) {
       try {
         await context.env.LEADERBOARD_KV.put('global_leaderboard', JSON.stringify(allEntries));
       } catch {}
     }
 
-    // 3. Persist to persistent global cloud storage
+    // 2. Persist to persistent global cloud storage
     await saveRemoteEntries(allEntries);
 
     return new Response(JSON.stringify({ success: true, allEntries }), {
@@ -179,7 +265,7 @@ export const onRequestDelete = async (context: { request: Request; env: Env }) =
     } catch {}
 
     const authKey = body?.adminKey || context.request.headers.get('x-admin-key');
-    const validKey = context.env?.LEADERBOARD_ADMIN_KEY || DEFAULT_ADMIN_KEY;
+    const validKey = context.env?.LEADERBOARD_ADMIN_KEY || 'kana-admin-2026';
 
     if (!authKey || authKey !== validKey) {
       return new Response(JSON.stringify({ error: 'Unauthorized: Invalid admin key' }), {
@@ -191,12 +277,19 @@ export const onRequestDelete = async (context: { request: Request; env: Env }) =
     const runId = body?.runId;
     const action = body?.action; // 'reset' or specific 'runId'
 
-    let entries = await fetchRemoteEntries();
+    let entries: LeaderboardEntry[] = [];
     if (context.env?.LEADERBOARD_KV) {
       try {
         const kvData = await context.env.LEADERBOARD_KV.get('global_leaderboard', 'json');
         if (Array.isArray(kvData) && kvData.length > 0) entries = kvData;
       } catch {}
+    }
+    if (entries.length === 0) {
+      const remote = await fetchRemoteEntries();
+      if (remote.length > 0) entries = remote;
+    }
+    if (entries.length === 0) {
+      entries = memoryLeaderboard;
     }
 
     if (action === 'reset' || !runId) {

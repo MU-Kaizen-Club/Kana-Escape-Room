@@ -5,6 +5,7 @@ export interface LeaderboardEntry {
   id: string;
   runName: string;
   playerName?: string;
+  playerTag?: string;
   playtimeSeconds: number;
   totalKana: number;
   characterId: CharacterId;
@@ -13,10 +14,109 @@ export interface LeaderboardEntry {
   craftedWords?: string[];
   timestamp: number;
   formattedDate: string;
+  isImported?: boolean;
+  verified?: boolean;
 }
 
 const LEADERBOARD_STORAGE_KEY = 'kana_escape_runs_leaderboard_v2';
 const OLD_STORAGE_KEY = 'kana_escape_leaderboard_v1';
+
+const GLOBAL_BIN_URL = 'https://extendsclass.com/api/json-storage/bin/adadbea';
+const GLOBAL_SECURITY_KEY = 'kana-escape-room-2026-secret-key';
+export const DEFAULT_ADMIN_KEY = 'kana-admin-2026';
+
+/**
+ * Generates a random 4-digit player discriminator tag (e.g. "#4829")
+ */
+export const generatePlayerTag = (): string => {
+  const num = Math.floor(1000 + Math.random() * 9000);
+  return `#${num}`;
+};
+
+/**
+ * Retrieves or creates the persistent player tag from localStorage
+ */
+export const getPlayerTag = (): string => {
+  try {
+    let tag = localStorage.getItem('kana_player_tag');
+    if (!tag || !/^#[a-zA-Z0-9]{3,6}$/.test(tag)) {
+      tag = generatePlayerTag();
+      localStorage.setItem('kana_player_tag', tag);
+    }
+    return tag;
+  } catch {
+    return '#1000';
+  }
+};
+
+/**
+ * Saves or updates the player's tag in localStorage
+ */
+export const setPlayerTag = (tag: string): string => {
+  try {
+    const trimmed = tag.trim();
+    const clean = trimmed.startsWith('#') ? trimmed : `#${trimmed}`;
+    const valid = clean.slice(0, 7);
+    localStorage.setItem('kana_player_tag', valid);
+    return valid;
+  } catch {
+    return tag;
+  }
+};
+
+/**
+ * Retrieves player's saved handle/name
+ */
+export const getSavedPlayerName = (): string => {
+  try {
+    return localStorage.getItem('kana_player_name') || '';
+  } catch {
+    return '';
+  }
+};
+
+export const setSavedPlayerName = (name: string): void => {
+  try {
+    localStorage.setItem('kana_player_name', name.trim().slice(0, 20));
+  } catch {}
+};
+
+/**
+ * Parses player display name and # tag discriminator.
+ * Supports explicit playerTag as well as compound names like "Alex#1234".
+ */
+export const parsePlayerIdentity = (entry: {
+  runName?: string;
+  playerName?: string;
+  playerTag?: string;
+}): {
+  name: string;
+  tag: string;
+  fullName: string;
+} => {
+  let explicitTag = entry.playerTag?.trim();
+  if (explicitTag && !explicitTag.startsWith('#')) {
+    explicitTag = `#${explicitTag}`;
+  }
+
+  let rawName = (entry.playerName || entry.runName || 'Explorer').trim();
+
+  // If there's no explicit playerTag, see if the name ends with a tag like #1234
+  if (!explicitTag) {
+    const match = rawName.match(/^(.*?)(#[a-zA-Z0-9]{3,6})$/);
+    if (match) {
+      rawName = match[1].trim();
+      explicitTag = match[2];
+    }
+  }
+
+  const name = rawName || 'Explorer';
+  const tag = explicitTag || '';
+  const fullName = tag ? `${name}${tag}` : name;
+
+  return { name, tag, fullName };
+};
+
 
 export const getLeaderboard = (): LeaderboardEntry[] => {
   try {
@@ -38,9 +138,6 @@ export const getLeaderboard = (): LeaderboardEntry[] => {
   return [];
 };
 
-const GLOBAL_BIN_URL = 'https://extendsclass.com/api/json-storage/bin/adadbea';
-const GLOBAL_SECURITY_KEY = 'kana-escape-room-2026-secret-key';
-
 export const fetchLeaderboardAsync = async (): Promise<LeaderboardEntry[]> => {
   const local = getLeaderboard();
   let serverEntries: LeaderboardEntry[] = [];
@@ -55,7 +152,7 @@ export const fetchLeaderboardAsync = async (): Promise<LeaderboardEntry[]> => {
       }
     }
   } catch {
-    // fallback
+    // offline or static host
   }
 
   // 2. Direct cloud bin fallback if Edge API is empty or unreachable
@@ -75,20 +172,33 @@ export const fetchLeaderboardAsync = async (): Promise<LeaderboardEntry[]> => {
     }
   }
 
-  // 3. Merge server and local runs, deduplicate by unique id
+  // Merge server and local runs, deduplicate by unique id
   const map = new Map<string, LeaderboardEntry>();
   serverEntries.forEach((e) => map.set(e.id, e));
 
-  // Sync any local-only run from this device up to the cloud
+  // Sync any local-only run from this device up to the cloud (only verified runs)
   local.forEach((e) => {
     if (!map.has(e.id)) {
       map.set(e.id, e);
-      // Background push to cloud so other devices immediately see it
-      fetch('/api/leaderboard', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(e),
-      }).catch(() => {});
+      if (!e.isImported && e.verified !== false) {
+        // Background push to cloud so other devices immediately see it
+        fetch('/api/leaderboard', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(e),
+        }).catch(() => {
+          fetch(GLOBAL_BIN_URL, {
+            method: 'PUT',
+            headers: {
+              'Content-Type': 'application/json',
+              'Security-key': GLOBAL_SECURITY_KEY,
+            },
+            body: JSON.stringify({
+              runs: Array.from(map.values()).filter((r) => !r.isImported && r.verified !== false),
+            }),
+          }).catch(() => {});
+        });
+      }
     }
   });
 
@@ -131,6 +241,13 @@ export const sortLeaderboard = (
   category: LeaderboardCategory = 'time'
 ): LeaderboardEntry[] => {
   return [...entries].sort((a, b) => {
+    // Verified runs always rank higher than unverified / imported runs
+    const aVerified = !a.isImported && a.verified !== false;
+    const bVerified = !b.isImported && b.verified !== false;
+    if (aVerified !== bVerified) {
+      return aVerified ? -1 : 1;
+    }
+
     if (category === 'artifacts') {
       const artA = getEntryArtifactCount(a);
       const artB = getEntryArtifactCount(b);
@@ -171,12 +288,16 @@ export const sortLeaderboard = (
 };
 
 export const saveLeaderboardEntry = (params: {
-  runName: string;
+  runName?: string;
+  playerName?: string;
+  playerTag?: string;
   playtimeSeconds: number;
   totalKana: number;
   characterId: CharacterId;
   roomsCleared?: number;
   craftedWords?: string[];
+  isImported?: boolean;
+  verified?: boolean;
 }): {
   entry: LeaderboardEntry;
   rank: number;
@@ -189,15 +310,31 @@ export const saveLeaderboardEntry = (params: {
   const characterName = char?.name || 'Explorer';
 
   const defaultSuggestedName = `Run #${current.length + 1}`;
-  const cleanName = params.runName.trim().slice(0, 20) || defaultSuggestedName;
+
+  // Process player ID tag
+  const rawTag = (params.playerTag || getPlayerTag()).trim();
+  const tag = rawTag ? (rawTag.startsWith('#') ? rawTag.slice(0, 7) : `#${rawTag.slice(0, 6)}`) : generatePlayerTag();
+  setPlayerTag(tag);
+
+  // Process player display name
+  const rawPlayerName = (params.playerName || params.runName || getSavedPlayerName() || defaultSuggestedName).trim();
+  const cleanPlayerName = rawPlayerName.replace(tag, '').trim().slice(0, 20) || defaultSuggestedName;
+  setSavedPlayerName(cleanPlayerName);
+
+  // Composite runName for backward compatibility and uniform display: e.g. "Alex#4829"
+  const fullRunName = cleanPlayerName.includes('#') ? cleanPlayerName : `${cleanPlayerName}${tag}`;
 
   const now = new Date();
   const formattedDate = `${now.getMonth() + 1}/${now.getDate()}/${now.getFullYear().toString().slice(-2)}`;
 
+  const isImportedRun = !!params.isImported;
+  const isVerified = !isImportedRun && params.verified !== false;
+
   const newEntry: LeaderboardEntry = {
     id: `run-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-    runName: cleanName,
-    playerName: cleanName,
+    runName: fullRunName,
+    playerName: cleanPlayerName,
+    playerTag: tag,
     playtimeSeconds: params.playtimeSeconds,
     totalKana: params.totalKana,
     characterId: params.characterId,
@@ -206,6 +343,8 @@ export const saveLeaderboardEntry = (params: {
     craftedWords: params.craftedWords || [],
     timestamp: Date.now(),
     formattedDate,
+    isImported: isImportedRun,
+    verified: isVerified,
   };
 
   const combined = [...current.filter((e) => e.id !== newEntry.id), newEntry];
@@ -227,8 +366,8 @@ export const saveLeaderboardEntry = (params: {
     // ignore
   }
 
-  // Asynchronously broadcast new run to Cloudflare live leaderboard and persistent cloud backend
-  if (typeof window !== 'undefined' && typeof fetch !== 'undefined') {
+  // Asynchronously broadcast new verified run to Cloudflare live leaderboard and persistent cloud backend
+  if (isVerified && typeof window !== 'undefined' && typeof fetch !== 'undefined') {
     fetch('/api/leaderboard', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -240,7 +379,7 @@ export const saveLeaderboardEntry = (params: {
           'Content-Type': 'application/json',
           'Security-key': GLOBAL_SECURITY_KEY,
         },
-        body: JSON.stringify({ runs: updated }),
+        body: JSON.stringify({ runs: updated.filter((e) => !e.isImported && e.verified !== false) }),
       }).catch(() => {});
     });
   }
@@ -276,8 +415,6 @@ export const formatTime = (secs: number): string => {
   return `${mins}:${s.toString().padStart(2, '0')}`;
 };
 
-export const DEFAULT_ADMIN_KEY = 'kana-admin-2026';
-
 export const deleteLeaderboardRunAsync = async (
   runId: string,
   adminKey: string
@@ -298,18 +435,16 @@ export const deleteLeaderboardRunAsync = async (
 
     if (res.ok) {
       const data = await res.json();
-      if (data && Array.isArray(data.allEntries)) {
-        allEntries = data.allEntries;
-        success = true;
-      }
+      allEntries = Array.isArray(data.allEntries) ? data.allEntries : [];
+      success = true;
     } else if (res.status === 401) {
       return { success: false, allEntries: getLeaderboard(), error: 'Incorrect Admin Key' };
     }
   } catch {
-    // fallback
+    // network error or static host
   }
 
-  // 2. Direct cloud bin fallback if Edge API was unavailable or local
+  // 2. Direct cloud bin fallback if Edge API was unavailable or not supported
   if (!success) {
     if (adminKey !== DEFAULT_ADMIN_KEY) {
       return { success: false, allEntries: getLeaderboard(), error: 'Incorrect Admin Key' };
@@ -317,7 +452,7 @@ export const deleteLeaderboardRunAsync = async (
     const current = await fetchLeaderboardAsync();
     allEntries = current.filter((e) => e.id !== runId);
     try {
-      await fetch(GLOBAL_BIN_URL, {
+      const putRes = await fetch(GLOBAL_BIN_URL, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
@@ -325,16 +460,18 @@ export const deleteLeaderboardRunAsync = async (
         },
         body: JSON.stringify({ runs: allEntries }),
       });
-      success = true;
+      if (putRes.ok) success = true;
     } catch {}
   }
 
-  // Update local storage
-  try {
-    localStorage.setItem(LEADERBOARD_STORAGE_KEY, JSON.stringify(allEntries));
-  } catch {}
+  if (success) {
+    try {
+      localStorage.setItem(LEADERBOARD_STORAGE_KEY, JSON.stringify(allEntries));
+    } catch {}
+    return { success: true, allEntries };
+  }
 
-  return { success, allEntries, error: success ? undefined : 'Failed to delete run' };
+  return { success: false, allEntries: getLeaderboard(), error: 'Failed to delete run (Network error).' };
 };
 
 export const resetGlobalLeaderboardAsync = async (
@@ -354,11 +491,14 @@ export const resetGlobalLeaderboardAsync = async (
     });
 
     if (res.ok) {
-      success = true;
+      clearLeaderboard();
+      return { success: true, allEntries: [] };
     } else if (res.status === 401) {
       return { success: false, allEntries: getLeaderboard(), error: 'Incorrect Admin Key' };
     }
-  } catch {}
+  } catch {
+    // network error or static host
+  }
 
   // 2. Direct cloud bin fallback
   if (!success) {
@@ -366,7 +506,7 @@ export const resetGlobalLeaderboardAsync = async (
       return { success: false, allEntries: getLeaderboard(), error: 'Incorrect Admin Key' };
     }
     try {
-      await fetch(GLOBAL_BIN_URL, {
+      const putRes = await fetch(GLOBAL_BIN_URL, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
@@ -374,10 +514,14 @@ export const resetGlobalLeaderboardAsync = async (
         },
         body: JSON.stringify({ runs: [] }),
       });
-      success = true;
+      if (putRes.ok) success = true;
     } catch {}
   }
 
-  clearLeaderboard();
-  return { success, allEntries: [], error: success ? undefined : 'Failed to reset leaderboard' };
+  if (success) {
+    clearLeaderboard();
+    return { success: true, allEntries: [] };
+  }
+
+  return { success: false, allEntries: getLeaderboard(), error: 'Failed to reset leaderboard (Network error).' };
 };

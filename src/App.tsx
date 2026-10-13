@@ -21,6 +21,7 @@ import { TableDisplayModal } from './components/ui/TableDisplayModal';
 import { ScreenTransition } from './components/ui/ScreenTransition';
 import { sounds } from './utils/audio';
 import { useDeviceMode } from './utils/useDeviceMode';
+import { computeSaveChecksum, getSaveData } from './utils/saveData';
 
 const STORAGE_KEY = 'kana_escape_room_save';
 
@@ -97,15 +98,39 @@ export default function App() {
 
   // Save detection
   const [hasSaveData, setHasSaveData] = useState(false);
+  const [isImportedRun, setIsImportedRun] = useState<boolean>(() => {
+    try {
+      const data = getSaveData();
+      return !!data?.isImported;
+    } catch {
+      return false;
+    }
+  });
+
+  // Online status detection
+  const [isOnline, setIsOnline] = useState<boolean>(() =>
+    typeof navigator !== 'undefined' ? navigator.onLine : true
+  );
+
+  useEffect(() => {
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
 
   // Check saved state on mount
   useEffect(() => {
     try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (raw) {
-        const parsed: GameSaveState = JSON.parse(raw);
-        if (parsed.currentRoomId) {
-          setHasSaveData(true);
+      const data = getSaveData();
+      if (data && data.currentRoomId) {
+        setHasSaveData(true);
+        if (data.isImported) {
+          setIsImportedRun(true);
         }
       }
     } catch {
@@ -130,7 +155,10 @@ export default function App() {
         shuffledRewards,
         roomHints,
         displayedItems,
+        isImported: isImportedRun,
+        version: 2,
       };
+      data.checksum = computeSaveChecksum(data);
       localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
       setHasSaveData(true);
     } catch {
@@ -148,6 +176,7 @@ export default function App() {
     shuffledRewards,
     roomHints,
     displayedItems,
+    isImportedRun,
   ]);
 
   // Autosave when room/inventory/unlocked status changes during play
@@ -157,7 +186,7 @@ export default function App() {
     }
   }, [gameState, inventory, completedMinigames, unlockedDoors, shuffledRewards, roomHints, displayedItems, saveGame]);
 
-  // Playtime tick
+  // Playtime tick - pauses when document is backgrounded/hidden
   useEffect(() => {
     if (
       gameState === 'TITLE' ||
@@ -168,10 +197,37 @@ export default function App() {
     )
       return;
     const timer = setInterval(() => {
+      if (document.hidden) return;
       setPlaytimeSeconds((s) => s + 1);
     }, 1000);
     return () => clearInterval(timer);
   }, [gameState]);
+
+  // Tab visibility management: suspend Web Audio and ambient when hidden; resume when visible
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.hidden) {
+        sounds.suspend();
+        sounds.stopAmbient();
+      } else {
+        sounds.resume();
+        if (
+          gameState === 'PLAYING' ||
+          gameState === 'INVENTORY' ||
+          gameState === 'DOOR_CLUE' ||
+          gameState === 'MINIGAME'
+        ) {
+          const room = ROOMS[currentRoomIndex];
+          if (room) {
+            sounds.startRoomAmbient(room.id);
+          }
+        }
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
+  }, [gameState, currentRoomIndex]);
 
   // Global Escape key coordinator:
   // - In MINIGAME: exits minigame back to PLAYING (never opens pause menu)
@@ -237,6 +293,7 @@ export default function App() {
     setRoomHints({});
     setSpawnDirection('forward');
     setPlaytimeSeconds(0);
+    setIsImportedRun(false);
     setTargetNextRoomIndex(0);
     setTransitionActive(true);
     setGameState('PLAYING');
@@ -246,9 +303,8 @@ export default function App() {
   // Continue from save with transition
   const handleContinueGame = () => {
     try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (raw) {
-        const data: GameSaveState = JSON.parse(raw);
+      const data = getSaveData();
+      if (data) {
         const rIndex = ROOMS.findIndex((r) => r.id === data.currentRoomId);
         const targetIdx = rIndex !== -1 ? rIndex : 0;
         setCurrentRoomIndex(targetIdx);
@@ -262,6 +318,7 @@ export default function App() {
         setPlaytimeSeconds(data.playtimeSeconds || 0);
         setVolumeEnabled(data.volumeEnabled ?? true);
         sounds.setEnabled(data.volumeEnabled ?? true);
+        setIsImportedRun(!!data.isImported);
         if (data.shuffledRewards && Object.keys(data.shuffledRewards).length > 0) {
           setShuffledRewards(data.shuffledRewards);
         } else {
@@ -283,33 +340,11 @@ export default function App() {
   const handleResetSave = () => {
     localStorage.removeItem(STORAGE_KEY);
     setHasSaveData(false);
+    setIsImportedRun(false);
     setDisplayedItems({});
     setRoomHints({});
     setShuffledRewards(generateShuffledRoomRewards(ROOMS));
     sounds.playFail();
-  };
-
-  // Import save data handler
-  const handleSaveImported = (data: GameSaveState) => {
-    const rIndex = ROOMS.findIndex((r) => r.id === data.currentRoomId);
-    const targetIdx = rIndex !== -1 ? rIndex : 0;
-    setCurrentRoomIndex(targetIdx);
-    setSelectedCharacter(data.selectedCharacter || 'adam');
-    setInventory(data.inventory || []);
-    setCompletedMinigames(data.completedMinigames || []);
-    setCraftedWords(data.craftedWords || []);
-    setUnlockedDoors(data.unlockedDoors || []);
-    setDisplayedItems(data.displayedItems || {});
-    setSpawnDirection('forward');
-    setPlaytimeSeconds(data.playtimeSeconds || 0);
-    setVolumeEnabled(data.volumeEnabled ?? true);
-    sounds.setEnabled(data.volumeEnabled ?? true);
-    if (data.shuffledRewards && Object.keys(data.shuffledRewards).length > 0) {
-      setShuffledRewards(data.shuffledRewards);
-    } else {
-      setShuffledRewards(generateShuffledRoomRewards(ROOMS));
-    }
-    setHasSaveData(true);
   };
 
   const currentRoom: RoomData = useMemo(() => {
@@ -420,7 +455,7 @@ export default function App() {
   const handlePlaceTableItem = (word: string, slotIndex: number) => {
     if (!activeTableId) return;
     setDisplayedItems((prev) => {
-      const existing = prev[activeTableId] ? [...prev[activeTableId]] : [];
+      const existing = prev[activeTableId] ? [...prev[activeTableId]] : ['', ''];
       existing[slotIndex] = word;
       return { ...prev, [activeTableId]: existing };
     });
@@ -429,9 +464,9 @@ export default function App() {
   const handleRemoveTableItem = (slotIndex: number) => {
     if (!activeTableId) return;
     setDisplayedItems((prev) => {
-      const existing = prev[activeTableId] ? [...prev[activeTableId]] : [];
+      const existing = prev[activeTableId] ? [...prev[activeTableId]] : ['', ''];
       existing[slotIndex] = '';
-      return { ...prev, [activeTableId]: existing.filter(Boolean) };
+      return { ...prev, [activeTableId]: existing };
     });
   };
 
@@ -476,7 +511,7 @@ export default function App() {
     sounds.playKanaObtained();
   };
 
-  const isPortraitEmulator = device.orientation === 'portrait';
+  const isPortraitEmulator = device.layoutMode === 'portrait';
 
   return (
     <main className={`w-screen ${isPortraitEmulator ? 'h-[100dvh]' : 'h-screen'} bg-[#0e0d1a] flex flex-col items-center justify-center relative overflow-hidden select-none`}>
@@ -488,7 +523,6 @@ export default function App() {
           onStartNewGame={handleStartNewGame}
           onContinueGame={handleContinueGame}
           onResetSave={handleResetSave}
-          onSaveImported={handleSaveImported}
           volumeEnabled={volumeEnabled}
           onToggleVolume={toggleVolume}
         />
@@ -507,6 +541,7 @@ export default function App() {
             currentRoom={currentRoom}
             inventory={inventory}
             isDoorUnlocked={isDoorUnlocked}
+            isOnline={isOnline}
             onReturnToPrevRoom={currentRoomIndex > 0 ? handleProceedPrevRoom : undefined}
             onOpenInventory={handleOpenInventory}
             onOpenPauseMenu={handleOpenPauseMenu}
@@ -611,6 +646,7 @@ export default function App() {
           playtimeSeconds={playtimeSeconds}
           selectedCharacter={selectedCharacter}
           craftedWords={craftedWords}
+          isImportedRun={isImportedRun}
           onPlayAgain={handleStartNewGame}
           onTitleScreen={() => setGameState('TITLE')}
         />
@@ -623,7 +659,7 @@ export default function App() {
           onResume={() => setGameState('PLAYING')}
           onOpenInventory={() => setGameState('INVENTORY')}
           onQuitToTitle={() => setGameState('TITLE')}
-          onSaveImported={handleSaveImported}
+          isImportedRun={isImportedRun}
         />
       )}
 

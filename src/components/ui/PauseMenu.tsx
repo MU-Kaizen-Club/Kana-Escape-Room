@@ -1,7 +1,5 @@
 import React, { useState } from 'react';
-import { GameSaveState } from '../../types/game';
 import { sounds } from '../../utils/audio';
-import { SaveTransferModal } from './SaveTransferModal';
 import { LeaderboardModal } from './LeaderboardModal';
 
 interface PauseMenuProps {
@@ -10,7 +8,7 @@ interface PauseMenuProps {
   onResume: () => void;
   onOpenInventory: () => void;
   onQuitToTitle: () => void;
-  onSaveImported?: (data: GameSaveState) => void;
+  isImportedRun?: boolean;
 }
 
 export const PauseMenu: React.FC<PauseMenuProps> = ({
@@ -19,11 +17,10 @@ export const PauseMenu: React.FC<PauseMenuProps> = ({
   onResume,
   onOpenInventory,
   onQuitToTitle,
-  onSaveImported,
+  isImportedRun = false,
 }) => {
   const [showControls, setShowControls] = useState(false);
   const [showAudioSettings, setShowAudioSettings] = useState(false);
-  const [showSaveTransfer, setShowSaveTransfer] = useState(false);
   const [showLeaderboard, setShowLeaderboard] = useState(false);
 
   const [ambientOn, setAmbientOn] = useState(sounds.isAmbientEnabled());
@@ -55,6 +52,13 @@ export const PauseMenu: React.FC<PauseMenuProps> = ({
         <h2 className="font-pixel text-base text-yellow-400 tracking-widest">
           — PAUSED —
         </h2>
+
+        {isImportedRun && (
+          <div className="bg-amber-950/80 border border-amber-600/70 px-2 py-1 text-[9px] font-pixel text-amber-300 flex items-center justify-center gap-1.5 w-full">
+            <span>⚠️</span>
+            <span>RESTORED SAVE (UNVERIFIED)</span>
+          </div>
+        )}
 
         {showControls ? (
           <div className="flex flex-col gap-3 w-full text-left bg-slate-950 p-4 border-2 border-slate-700 text-xs font-pixel text-slate-300">
@@ -229,17 +233,6 @@ export const PauseMenu: React.FC<PauseMenuProps> = ({
             <button
               onClick={() => {
                 sounds.playSelect();
-                setShowSaveTransfer(true);
-              }}
-              className="w-full py-2 bg-slate-800 hover:bg-slate-700 text-yellow-300 font-pixel text-xs border-2 border-yellow-600/80 cursor-pointer active:translate-y-0.5 flex justify-center items-center gap-2"
-            >
-              <span>💾</span>
-              <span>SAVE BACKUP & TRANSFER</span>
-            </button>
-
-            <button
-              onClick={() => {
-                sounds.playSelect();
                 onQuitToTitle();
               }}
               className="w-full py-2 bg-rose-900/60 hover:bg-rose-800 text-rose-200 font-pixel text-xs border-2 border-rose-600 cursor-pointer active:translate-y-0.5 mt-1"
@@ -247,15 +240,6 @@ export const PauseMenu: React.FC<PauseMenuProps> = ({
               QUIT TO TITLE
             </button>
           </div>
-        )}
-
-        {showSaveTransfer && (
-          <SaveTransferModal
-            onClose={() => setShowSaveTransfer(false)}
-            onSaveImported={(data) => {
-              if (onSaveImported) onSaveImported(data);
-            }}
-          />
         )}
 
         {showLeaderboard && (

@@ -193,8 +193,13 @@ const GameViewportComponent: React.FC<GameViewportProps> = ({
     }
     tapTargetRef.current = null;
     tapRippleRef.current = null;
+    const isPortrait = device.layoutMode === 'portrait';
+    const initScale = isPortrait
+      ? (room.id === 'room-3' || room.number === 3 ? 2.10 : (room.id === 'room-2' || room.number === 2 ? 2.35 : 2.85))
+      : (device.scale || DEFAULT_SCALE);
+    camOffsetRef.current.scale = initScale;
     atmosphereRef.current.init(room.id, room.width, room.height, TILE_SIZE);
-  }, [room, spawnDirection]);
+  }, [room, spawnDirection, device.layoutMode, device.scale]);
 
   // When locked (minigame or modal active), clear keys and stop movement
   useEffect(() => {
@@ -236,13 +241,13 @@ const GameViewportComponent: React.FC<GameViewportProps> = ({
       } else if (e.code === 'KeyI') {
         e.preventDefault();
         onOpenInventory();
-      } else if (e.code === 'F1') {
+      } else if (import.meta.env.DEV && e.code === 'F1') {
         e.preventDefault();
         setDebugMode((d) => !d);
-      } else if (e.code === 'F3' && onDebugGiveKana) {
+      } else if (import.meta.env.DEV && e.code === 'F3' && onDebugGiveKana) {
         e.preventDefault();
         onDebugGiveKana();
-      } else if (e.code === 'F4' && onDebugUnlockDoor) {
+      } else if (import.meta.env.DEV && e.code === 'F4' && onDebugUnlockDoor) {
         e.preventDefault();
         onDebugUnlockDoor();
       }
@@ -256,11 +261,21 @@ const GameViewportComponent: React.FC<GameViewportProps> = ({
       keysRef.current[e.code] = false;
     };
 
+    const handleResetInputs = () => {
+      keysRef.current = {};
+      joystickVectorRef.current = { x: 0, y: 0 };
+      activeDpadPointerRef.current = null;
+    };
+
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('keyup', handleKeyUp);
+    window.addEventListener('blur', handleResetInputs);
+    document.addEventListener('visibilitychange', handleResetInputs);
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
+      window.removeEventListener('blur', handleResetInputs);
+      document.removeEventListener('visibilitychange', handleResetInputs);
     };
   }, [isLocked, isNearDoor, isNearEntrance, nearbyInteractable, onInteract, onInteractDoor, onReturnToPrevRoom, onOpenInventory, onOpenPauseMenu, onDebugGiveKana, onDebugUnlockDoor]);
 
@@ -698,6 +713,12 @@ const GameViewportComponent: React.FC<GameViewportProps> = ({
     };
 
     const gameLoop = (currentTime?: number) => {
+      if (document.hidden) {
+        lastTime = performance.now();
+        animId = requestAnimationFrame(gameLoop);
+        return;
+      }
+
       const now = currentTime || performance.now();
       let deltaMs = now - lastTime;
       lastTime = now;
@@ -720,8 +741,18 @@ const GameViewportComponent: React.FC<GameViewportProps> = ({
       ctx.fillRect(0, 0, canvas.width, canvas.height);
 
       ctx.save();
-      // Center camera on player with widescreen room boundary centering
-      const currentScale = device.scale || DEFAULT_SCALE;
+      // Center camera on player with room-specific scale (Room 1: 2.85; Room 2: 2.35; Room 3: 2.10)
+      const isPortrait = device.layoutMode === 'portrait';
+      let currentScale = device.scale || DEFAULT_SCALE;
+      if (isPortrait) {
+        if (room.id === 'room-3' || room.number === 3) {
+          currentScale = 2.10;
+        } else if (room.id === 'room-2' || room.number === 2) {
+          currentScale = 2.35;
+        } else {
+          currentScale = 2.85;
+        }
+      }
       const viewW = canvas.width / currentScale;
       const viewH = canvas.height / currentScale;
 
@@ -849,35 +880,57 @@ const GameViewportComponent: React.FC<GameViewportProps> = ({
                 const tableSprite = getTableSprite(room.id, deco.width || 2, deco.height || 1.5);
                 ctx.drawImage(tableSprite, decoX, decoY, w, h);
 
-                // Draw exhibited collectibles on tabletop
+                // Draw exhibited collectibles on tabletop with solid, opaque pedestals (no transparent hologram effect)
                 const displayed = (displayedItems && deco.id && displayedItems[deco.id]) || [];
                 if (displayed && displayed.length > 0) {
                   // Slot 1 (Left)
                   if (displayed[0]) {
                     const item1 = JAPANESE_DICTIONARY[displayed[0]] || { icon: '✨' };
-                    ctx.fillStyle = 'rgba(250, 204, 21, 0.4)';
-                    ctx.beginPath();
-                    ctx.ellipse(decoX + 8, decoY + 5, 5, 2, 0, 0, Math.PI * 2);
-                    ctx.fill();
                     ctx.save();
-                    ctx.font = '11px serif';
+                    // Soft shadow
+                    ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+                    ctx.beginPath();
+                    ctx.ellipse(decoX + 8, decoY + 6, 6, 2.5, 0, 0, Math.PI * 2);
+                    ctx.fill();
+                    // Solid dark velvet display coaster with gold rim (blocks wood bleed-through)
+                    ctx.fillStyle = '#1e1b4b';
+                    ctx.strokeStyle = '#facc15';
+                    ctx.lineWidth = 1;
+                    ctx.beginPath();
+                    ctx.ellipse(decoX + 8, decoY + 4, 5, 2.2, 0, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.stroke();
+                    // 100% solid opaque artifact icon
+                    ctx.fillStyle = '#ffffff';
+                    ctx.font = 'bold 11px serif';
                     ctx.textAlign = 'center';
                     ctx.textBaseline = 'middle';
-                    ctx.fillText(item1.icon, decoX + 8, decoY + 3);
+                    ctx.fillText(item1.icon, decoX + 8, decoY + 2.5);
                     ctx.restore();
                   }
                   // Slot 2 (Right)
                   if (displayed[1]) {
                     const item2 = JAPANESE_DICTIONARY[displayed[1]] || { icon: '✨' };
-                    ctx.fillStyle = 'rgba(250, 204, 21, 0.4)';
-                    ctx.beginPath();
-                    ctx.ellipse(decoX + w - 8, decoY + 5, 5, 2, 0, 0, Math.PI * 2);
-                    ctx.fill();
                     ctx.save();
-                    ctx.font = '11px serif';
+                    // Soft shadow
+                    ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+                    ctx.beginPath();
+                    ctx.ellipse(decoX + w - 8, decoY + 6, 6, 2.5, 0, 0, Math.PI * 2);
+                    ctx.fill();
+                    // Solid dark velvet display coaster with gold rim
+                    ctx.fillStyle = '#1e1b4b';
+                    ctx.strokeStyle = '#facc15';
+                    ctx.lineWidth = 1;
+                    ctx.beginPath();
+                    ctx.ellipse(decoX + w - 8, decoY + 4, 5, 2.2, 0, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.stroke();
+                    // 100% solid opaque artifact icon
+                    ctx.fillStyle = '#ffffff';
+                    ctx.font = 'bold 11px serif';
                     ctx.textAlign = 'center';
                     ctx.textBaseline = 'middle';
-                    ctx.fillText(item2.icon, decoX + w - 8, decoY + 3);
+                    ctx.fillText(item2.icon, decoX + w - 8, decoY + 2.5);
                     ctx.restore();
                   }
                 }
@@ -956,13 +1009,13 @@ const GameViewportComponent: React.FC<GameViewportProps> = ({
     displayedItems,
   ]);
 
-  const isPortraitEmulator = device.orientation === 'portrait';
+  const isPortraitEmulator = device.layoutMode === 'portrait';
 
   return (
     <div className={`w-full flex flex-col items-center select-none ${isPortraitEmulator ? 'h-full flex-1 justify-between min-h-0' : 'h-full justify-center my-auto'}`}>
       {/* 1. Upper Console Screen (Pure Game Viewport) */}
       <div
-        className={`relative flex flex-col items-center justify-center w-full transition-all bg-black border-4 border-slate-800 pixel-box shadow-2xl overflow-hidden ${
+        className={`relative flex flex-col items-center justify-center w-full bg-black border-4 border-slate-800 pixel-box shadow-2xl overflow-hidden ${
           isPortraitEmulator
             ? 'flex-1 min-h-0 rounded-t-sm'
             : device.isDesktop
@@ -1024,8 +1077,8 @@ const GameViewportComponent: React.FC<GameViewportProps> = ({
           </div>
         )}
 
-        {/* Landscape floating controls for mobile landscape only */}
-        {!isPortraitEmulator && !isLocked && (showTouchControls || device.isMobile) && (
+        {/* Landscape floating controls for mobile/touch landscape */}
+        {!isPortraitEmulator && !isLocked && (showTouchControls || device.isMobile || device.isTouch) && (
           <>
             <div className="absolute bottom-3 left-3 z-30 opacity-80 hover:opacity-100 transition-opacity pointer-events-auto">
               {controlType === 'joystick' ? (
@@ -1088,7 +1141,7 @@ const GameViewportComponent: React.FC<GameViewportProps> = ({
         )}
 
         {/* Desktop Controls Bar at bottom of screen - Hidden on touch/mobile to prevent overlapping buttons */}
-        {!isPortraitEmulator && !isLocked && !device.isMobile && !showTouchControls && (
+        {!isPortraitEmulator && !isLocked && !device.isMobile && !device.isTouch && !showTouchControls && (
           <div className="absolute bottom-1 left-2 right-2 flex justify-between items-center text-[9px] sm:text-[10px] font-pixel text-slate-400 bg-black/85 backdrop-blur-xs px-2 sm:px-3 py-1 border border-slate-700/60 z-20 gap-2">
             <span className="hidden sm:inline">WASD/Arrows = Move • [E] = Interact • [I] = Bag</span>
             <span className="sm:hidden text-amber-300/80">Kana Escape</span>
@@ -1111,7 +1164,7 @@ const GameViewportComponent: React.FC<GameViewportProps> = ({
         )}
 
         {/* Debug Keys Indicator */}
-        {debugMode && (
+        {import.meta.env.DEV && debugMode && (
           <div className="absolute top-2 left-2 bg-red-950/90 border border-red-500 text-red-200 text-[9px] font-mono p-2 z-40">
             <div>[DEBUG MODE ACTIVE]</div>
             <div>F1: Toggle Collision Boxes</div>
@@ -1122,7 +1175,7 @@ const GameViewportComponent: React.FC<GameViewportProps> = ({
       </div>
 
       {/* 2. Lower Handheld Emulator Control Deck (Dedicated Bottom Controller Panel in Portrait) */}
-      {isPortraitEmulator && !isLocked && (
+      {isPortraitEmulator && (
         <div className="w-full max-w-xl sm:max-w-2xl flex flex-col justify-between shrink-0 h-[46dvh] max-h-[380px] min-h-[250px] bg-gradient-to-b from-[#1c1b36] via-[#141328] to-[#0a0914] border-4 border-t-0 border-slate-800 shadow-[inset_0_2px_4px_rgba(255,255,255,0.08),0_12px_32px_rgba(0,0,0,0.9)] rounded-b-xl px-3 py-2 sm:px-5 sm:py-3 select-none touch-none">
           {/* Top Console Bevel & Branding Strip */}
           <div className="w-full flex justify-between items-center pb-1 border-b border-slate-700/60 text-[8px] font-pixel text-slate-400">
@@ -1160,6 +1213,7 @@ const GameViewportComponent: React.FC<GameViewportProps> = ({
                   onPointerMove={handleDpadPointerMove}
                   onPointerUp={handleDpadPointerUp}
                   onPointerCancel={handleDpadPointerUp}
+                  onLostPointerCapture={handleDpadPointerUp}
                   className="relative w-[110px] h-[110px] sm:w-[124px] sm:h-[124px] rounded-full bg-slate-950/95 border-4 border-slate-700 shadow-2xl flex items-center justify-center select-none touch-none cursor-pointer"
                   style={{ touchAction: 'none' }}
                 >
